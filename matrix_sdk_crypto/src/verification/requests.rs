@@ -393,7 +393,6 @@ impl VerificationRequest {
         match &*self.inner.lock().unwrap() {
             InnerRequest::Ready(s) => s.clone().into_started_sas(
                 content,
-                self.verification_cache.clone(),
                 s.store.clone(),
                 s.account.clone(),
                 s.private_cross_signing_identity.clone(),
@@ -414,7 +413,6 @@ impl VerificationRequest {
         match &*self.inner.lock().unwrap() {
             InnerRequest::Ready(s) => Some(s.clone().start_sas(
                 s.store.clone(),
-                self.verification_cache.clone(),
                 s.account.clone(),
                 s.private_cross_signing_identity.clone(),
                 device,
@@ -476,7 +474,6 @@ impl InnerRequest {
     fn into_started_sas<'a>(
         self,
         content: impl Into<StartContent<'a>>,
-        cache: VerificationCache,
         store: Arc<Box<dyn CryptoStore>>,
         account: ReadOnlyAccount,
         private_identity: PrivateCrossSigningIdentity,
@@ -486,7 +483,6 @@ impl InnerRequest {
         if let InnerRequest::Ready(s) = self {
             Ok(Some(s.into_started_sas(
                 content,
-                cache,
                 store,
                 account,
                 private_identity,
@@ -650,7 +646,6 @@ impl RequestState<Ready> {
     fn into_started_sas<'a>(
         self,
         content: impl Into<StartContent<'a>>,
-        cache: VerificationCache,
         store: Arc<Box<dyn CryptoStore>>,
         account: ReadOnlyAccount,
         private_identity: PrivateCrossSigningIdentity,
@@ -671,7 +666,6 @@ impl RequestState<Ready> {
 
         Sas::from_start_event(
             account,
-            cache,
             private_identity,
             other_device,
             store,
@@ -683,7 +677,6 @@ impl RequestState<Ready> {
     fn start_sas(
         self,
         store: Arc<Box<dyn CryptoStore>>,
-        cache: VerificationCache,
         account: ReadOnlyAccount,
         private_identity: PrivateCrossSigningIdentity,
         other_device: ReadOnlyDevice,
@@ -693,7 +686,6 @@ impl RequestState<Ready> {
             FlowId::ToDevice(t) => {
                 let (sas, content) = Sas::start(
                     account,
-                    cache,
                     private_identity,
                     other_device,
                     store,
@@ -707,7 +699,6 @@ impl RequestState<Ready> {
                     e,
                     r,
                     account,
-                    cache,
                     private_identity,
                     other_device,
                     store,

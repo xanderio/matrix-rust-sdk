@@ -40,7 +40,7 @@ use matrix_sdk_common::{
 };
 use tracing::{error, info, trace, warn};
 
-use super::{FlowId, VerificationCache};
+use super::FlowId;
 use crate::{
     error::SignatureError,
     identities::{LocalTrust, ReadOnlyDevice, UserIdentities},
@@ -66,7 +66,6 @@ pub enum VerificationResult {
 /// Short authentication string object.
 pub struct Sas {
     inner: Arc<Mutex<InnerSas>>,
-    pub(super) cache: VerificationCache,
     store: Arc<Box<dyn CryptoStore>>,
     account: ReadOnlyAccount,
     private_identity: PrivateCrossSigningIdentity,
@@ -121,7 +120,6 @@ impl Sas {
     fn start_helper(
         inner_sas: InnerSas,
         account: ReadOnlyAccount,
-        cache: VerificationCache,
         private_identity: PrivateCrossSigningIdentity,
         other_device: ReadOnlyDevice,
         store: Arc<Box<dyn CryptoStore>>,
@@ -132,7 +130,6 @@ impl Sas {
         Sas {
             inner: Arc::new(Mutex::new(inner_sas)),
             account,
-            cache,
             private_identity,
             store,
             other_device,
@@ -153,7 +150,6 @@ impl Sas {
     /// sent out through the server to the other device.
     pub(crate) fn start(
         account: ReadOnlyAccount,
-        cache: VerificationCache,
         private_identity: PrivateCrossSigningIdentity,
         other_device: ReadOnlyDevice,
         store: Arc<Box<dyn CryptoStore>>,
@@ -171,7 +167,6 @@ impl Sas {
             Self::start_helper(
                 inner,
                 account,
-                cache,
                 private_identity,
                 other_device,
                 store,
@@ -195,7 +190,6 @@ impl Sas {
         flow_id: EventId,
         room_id: RoomId,
         account: ReadOnlyAccount,
-        cache: VerificationCache,
         private_identity: PrivateCrossSigningIdentity,
         other_device: ReadOnlyDevice,
         store: Arc<Box<dyn CryptoStore>>,
@@ -213,7 +207,6 @@ impl Sas {
             Self::start_helper(
                 inner,
                 account,
-                cache,
                 private_identity,
                 other_device,
                 store,
@@ -235,7 +228,6 @@ impl Sas {
     /// the other side.
     pub(crate) fn from_start_event(
         account: ReadOnlyAccount,
-        cache: VerificationCache,
         private_identity: PrivateCrossSigningIdentity,
         other_device: ReadOnlyDevice,
         store: Arc<Box<dyn CryptoStore>>,
@@ -253,7 +245,6 @@ impl Sas {
 
         Ok(Sas {
             inner: Arc::new(Mutex::new(inner)),
-            cache,
             account,
             private_identity,
             other_device,
@@ -567,14 +558,15 @@ impl Sas {
         })
     }
 
-    pub(crate) fn cancel_if_timed_out(&self) {
-        if !(self.is_cancelled() || self.is_done()) && self.timed_out() {
+    pub(crate) fn cancel_if_timed_out(&self) -> Option<OutgoingVerificationRequest> {
+        if self.is_cancelled() || self.is_done() {
+            None
+        } else if self.timed_out() {
             let mut guard = self.inner.lock().unwrap();
             let sas: InnerSas = (*guard).clone();
             let (sas, content) = sas.cancel(CancelCode::Timeout);
             *guard = sas;
-
-            let request: Option<OutgoingVerificationRequest> = content.map(|c| match c {
+            content.map(|c| match c {
                 CancelContent::Room(room_id, content) => RoomMessageRequest {
                     room_id,
                     txn_id: Uuid::new_v4(),
@@ -584,11 +576,9 @@ impl Sas {
                 CancelContent::ToDevice(c) => self
                     .content_to_request(AnyToDeviceEventContent::KeyVerificationCancel(c))
                     .into(),
-            });
-
-            if let Some(request) = request {
-                self.cache.add_request(request.into());
-            }
+            })
+        } else {
+            None
         }
     }
 
@@ -639,26 +629,22 @@ impl Sas {
         self.inner.lock().unwrap().decimals()
     }
 
-    pub(crate) fn receive_room_event(&self, event: &AnyMessageEvent) {
+    pub(crate) fn receive_room_event(&self, event: &AnyMessageEvent) -> Option<OutgoingContent> {
         let mut guard = self.inner.lock().unwrap();
         let sas: InnerSas = (*guard).clone();
         let (sas, content) = sas.receive_room_event(event);
         *guard = sas;
 
-        if let Some(content) = content {
-            self.cache.queue_up_content(self.other_user_id(), self.other_device_id(), content)
-        }
+        content
     }
 
-    pub(crate) fn receive_event(&self, event: &AnyToDeviceEvent) {
+    pub(crate) fn receive_event(&self, event: &AnyToDeviceEvent) -> Option<OutgoingContent> {
         let mut guard = self.inner.lock().unwrap();
         let sas: InnerSas = (*guard).clone();
         let (sas, content) = sas.receive_event(event);
         *guard = sas;
 
-        if let Some(content) = content {
-            self.cache.queue_up_content(self.other_user_id(), self.other_device_id(), content)
-        }
+        content
     }
 
     pub(crate) fn verified_devices(&self) -> Option<Arc<[ReadOnlyDevice]>> {
@@ -727,10 +713,7 @@ mod test {
     use crate::{
         olm::PrivateCrossSigningIdentity,
         store::{CryptoStore, MemoryStore},
-        verification::{
-            test::{get_content_from_request, wrap_any_to_device_content},
-            VerificationCache,
-        },
+        verification::test::{get_content_from_request, wrap_any_to_device_content},
         ReadOnlyAccount, ReadOnlyDevice,
     };
 
@@ -759,9 +742,7 @@ mod test {
         let bob_device = ReadOnlyDevice::from_account(&bob).await;
 
         let alice_store: Arc<Box<dyn CryptoStore>> = Arc::new(Box::new(MemoryStore::new()));
-        let alice_cache = VerificationCache::new();
         let bob_store = MemoryStore::new();
-        let bob_cache = VerificationCache::new();
 
         bob_store.save_devices(vec![alice_device.clone()]).await;
 
@@ -769,7 +750,6 @@ mod test {
 
         let (alice, content) = Sas::start(
             alice,
-            alice_cache,
             PrivateCrossSigningIdentity::empty(alice_id()),
             bob_device,
             alice_store,
@@ -779,7 +759,6 @@ mod test {
 
         let bob = Sas::from_start_event(
             bob,
-            bob_cache,
             PrivateCrossSigningIdentity::empty(bob_id()),
             alice_device,
             bob_store,
@@ -792,16 +771,13 @@ mod test {
             get_content_from_request(&bob.accept().unwrap()),
         );
 
-        alice.receive_event(&event);
+        let content = alice.receive_event(&event);
 
         assert!(!alice.can_be_presented());
         assert!(!bob.can_be_presented());
 
-        let request = alice.cache.get_first_request().unwrap();
-        let event = wrap_any_to_device_content(alice.user_id(), get_content_from_request(&request));
-        bob.receive_event(&event);
-        let request = bob.cache.get_first_request().unwrap();
-        let event = wrap_any_to_device_content(bob.user_id(), get_content_from_request(&request));
+        let event = wrap_any_to_device_content(alice.user_id(), content.unwrap());
+        let event = wrap_any_to_device_content(bob.user_id(), bob.receive_event(&event).unwrap());
 
         assert!(bob.can_be_presented());
 
