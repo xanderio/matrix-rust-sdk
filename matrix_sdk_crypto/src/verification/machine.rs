@@ -16,10 +16,7 @@ use std::{convert::TryFrom, sync::Arc};
 
 use dashmap::DashMap;
 use matrix_sdk_common::{
-    events::{
-        room::message::MessageType, AnyMessageEvent, AnySyncMessageEvent, AnySyncRoomEvent,
-        AnyToDeviceEvent,
-    },
+    events::{room::message::MessageType, AnySyncMessageEvent, AnySyncRoomEvent, AnyToDeviceEvent},
     identifiers::{DeviceId, EventId, RoomId, UserId},
     locks::Mutex,
     uuid::Uuid,
@@ -41,7 +38,8 @@ use crate::{
 pub struct VerificationCache {
     sas_verification: Arc<DashMap<String, Sas>>,
     room_sas_verifications: Arc<DashMap<EventId, Sas>>,
-    outgoing_requests: Arc<DashMap<Uuid, OutgoingRequest>>,
+    outgoing_requests: Arc<DashMap<Uuid, OutgoingVerificationRequest>>,
+    outgoing_signature_requests: Arc<DashMap<Uuid, OutgoingRequest>>,
 }
 
 impl VerificationCache {
@@ -50,6 +48,7 @@ impl VerificationCache {
             sas_verification: DashMap::new().into(),
             room_sas_verifications: DashMap::new().into(),
             outgoing_requests: DashMap::new().into(),
+            outgoing_signature_requests: DashMap::new().into(),
         }
     }
 
@@ -62,34 +61,17 @@ impl VerificationCache {
         self.room_sas_verifications.get(event_id).map(|s| s.clone())
     }
 
-    pub fn garbage_collect(&self) -> Vec<OutgoingRequest> {
+    pub fn garbage_collect(&self) {
         self.sas_verification.retain(|_, s| !(s.is_done() || s.is_cancelled()));
         self.room_sas_verifications.retain(|_, s| !(s.is_done() || s.is_cancelled()));
 
-        let mut requests: Vec<OutgoingRequest> = self
-            .sas_verification
-            .iter()
-            .filter_map(|s| {
-                s.cancel_if_timed_out().map(|r| OutgoingRequest {
-                    request_id: r.request_id(),
-                    request: Arc::new(r.into()),
-                })
-            })
-            .collect();
-        let room_requests: Vec<OutgoingRequest> = self
-            .room_sas_verifications
-            .iter()
-            .filter_map(|s| {
-                s.cancel_if_timed_out().map(|r| OutgoingRequest {
-                    request_id: r.request_id(),
-                    request: Arc::new(r.into()),
-                })
-            })
-            .collect();
+        for sas in self.sas_verification.iter() {
+            sas.cancel_if_timed_out();
+        }
 
-        requests.extend(room_requests);
-
-        requests
+        for sas in self.room_sas_verifications.iter() {
+            sas.cancel_if_timed_out();
+        }
     }
 
     pub fn get_sas(&self, transaction_id: &str) -> Option<Sas> {
@@ -106,8 +88,12 @@ impl VerificationCache {
         }
     }
 
-    pub fn add_request(&self, request: OutgoingRequest) {
-        self.outgoing_requests.insert(request.request_id, request);
+    pub fn add_request(&self, request: OutgoingVerificationRequest) {
+        self.outgoing_requests.insert(request.request_id(), request);
+    }
+
+    pub fn add_signature_upload_request(&self, request: OutgoingRequest) {
+        self.outgoing_signature_requests.insert(request.request_id, request);
     }
 
     pub fn queue_up_content(
@@ -121,20 +107,13 @@ impl VerificationCache {
                 let request = content_to_request(recipient, recipient_device.to_owned(), c);
                 let request_id = request.txn_id;
 
-                let request = OutgoingRequest { request_id, request: Arc::new(request.into()) };
-
-                self.outgoing_requests.insert(request_id, request);
+                self.outgoing_requests.insert(request_id, request.into());
             }
 
             OutgoingContent::Room(r, c) => {
                 let request_id = Uuid::new_v4();
-
-                let request = OutgoingRequest {
-                    request: Arc::new(
-                        RoomMessageRequest { room_id: r, txn_id: request_id, content: c }.into(),
-                    ),
-                    request_id,
-                };
+                let request =
+                    RoomMessageRequest { room_id: r, txn_id: request_id, content: c }.into();
 
                 self.outgoing_requests.insert(request_id, request);
             }
@@ -143,6 +122,15 @@ impl VerificationCache {
 
     pub fn mark_request_as_sent(&self, uuid: &Uuid) {
         self.outgoing_requests.remove(uuid);
+        self.outgoing_signature_requests.remove(uuid);
+    }
+
+    #[cfg(test)]
+    pub fn get_first_request(&self) -> Option<OutgoingVerificationRequest> {
+        let request = self.outgoing_requests.iter().next().map(|r| r.value().clone());
+        self.outgoing_requests.clear();
+
+        request
     }
 }
 
@@ -179,6 +167,7 @@ impl VerificationMachine {
 
         let (sas, content) = Sas::start(
             self.account.clone(),
+            self.verifications.clone(),
             private_identity,
             device.clone(),
             self.store.clone(),
@@ -222,30 +211,21 @@ impl VerificationMachine {
         self.verifications.queue_up_content(recipient, recipient_device, content)
     }
 
-    fn receive_room_event_helper(&self, sas: &Sas, event: &AnyMessageEvent) {
-        if let Some(c) = sas.receive_room_event(event) {
-            self.queue_up_content(sas.other_user_id(), sas.other_device_id(), c);
-        }
-    }
-
-    fn receive_event_helper(&self, sas: &Sas, event: &AnyToDeviceEvent) {
-        if let Some(c) = sas.receive_event(event) {
-            self.queue_up_content(sas.other_user_id(), sas.other_device_id(), c);
-        }
-    }
-
     pub fn mark_request_as_sent(&self, uuid: &Uuid) {
         self.verifications.mark_request_as_sent(uuid);
     }
 
     pub fn outgoing_messages(&self) -> Vec<OutgoingRequest> {
-        self.verifications.outgoing_requests.iter().map(|r| (*r).clone()).collect()
+        let verification_requests =
+            self.verifications.outgoing_requests.iter().map(|r| (*r).clone().into());
+        let signature_requests =
+            self.verifications.outgoing_signature_requests.iter().map(|r| r.value().clone().into());
+
+        verification_requests.chain(signature_requests).collect()
     }
 
     pub fn garbage_collect(&self) {
-        for request in self.verifications.garbage_collect() {
-            self.verifications.add_request(request)
-        }
+        self.verifications.garbage_collect();
     }
 
     pub async fn receive_room_event(
@@ -341,50 +321,27 @@ impl VerificationMachine {
                 }
                 AnySyncMessageEvent::KeyVerificationKey(e) => {
                     if let Some(s) = self.verifications.get_room_sas(&e.content.relation.event_id) {
-                        self.receive_room_event_helper(
-                            &s,
-                            &m.clone().into_full_event(room_id.clone()),
-                        )
+                        s.receive_room_event(&m.clone().into_full_event(room_id.clone()));
                     };
                 }
                 AnySyncMessageEvent::KeyVerificationMac(e) => {
                     if let Some(s) = self.verifications.get_room_sas(&e.content.relation.event_id) {
-                        self.receive_room_event_helper(
-                            &s,
-                            &m.clone().into_full_event(room_id.clone()),
-                        );
+                        s.receive_room_event(&m.clone().into_full_event(room_id.clone()));
                     }
                 }
 
                 AnySyncMessageEvent::KeyVerificationDone(e) => {
                     if let Some(s) = self.verifications.get_room_sas(&e.content.relation.event_id) {
-                        let content =
-                            s.receive_room_event(&m.clone().into_full_event(room_id.clone()));
+                        s.receive_room_event(&m.clone().into_full_event(room_id.clone()));
 
                         if s.is_done() {
                             match s.mark_as_done().await? {
-                                VerificationResult::Ok => {
-                                    if let Some(c) = content {
-                                        self.queue_up_content(
-                                            s.other_user_id(),
-                                            s.other_device_id(),
-                                            c,
-                                        );
-                                    }
-                                }
+                                VerificationResult::Ok => {}
                                 VerificationResult::Cancel(r) => {
-                                    self.verifications.add_request(r.into());
+                                    self.verifications.add_request(r);
                                 }
                                 VerificationResult::SignatureUpload(r) => {
-                                    self.verifications.add_request(r.into());
-
-                                    if let Some(c) = content {
-                                        self.queue_up_content(
-                                            s.other_user_id(),
-                                            s.other_device_id(),
-                                            c,
-                                        );
-                                    }
+                                    self.verifications.add_signature_upload_request(r.into());
                                 }
                             }
                         }
@@ -432,6 +389,7 @@ impl VerificationMachine {
                     let private_identity = self.private_identity.lock().await.clone();
                     match Sas::from_start_event(
                         self.account.clone(),
+                        self.verifications.clone(),
                         private_identity,
                         d,
                         self.store.clone(),
@@ -463,17 +421,17 @@ impl VerificationMachine {
             }
             AnyToDeviceEvent::KeyVerificationAccept(e) => {
                 if let Some(s) = self.get_sas(&e.content.transaction_id) {
-                    self.receive_event_helper(&s, event)
+                    s.receive_event(&event);
                 };
             }
             AnyToDeviceEvent::KeyVerificationKey(e) => {
                 if let Some(s) = self.get_sas(&e.content.transaction_id) {
-                    self.receive_event_helper(&s, event)
+                    s.receive_event(&event);
                 };
             }
             AnyToDeviceEvent::KeyVerificationMac(e) => {
                 if let Some(s) = self.get_sas(&e.content.transaction_id) {
-                    self.receive_event_helper(&s, event);
+                    s.receive_event(&event);
 
                     if s.is_done() {
                         match s.mark_as_done().await? {
@@ -482,7 +440,7 @@ impl VerificationMachine {
                                 self.verifications.add_request(r.into());
                             }
                             VerificationResult::SignatureUpload(r) => {
-                                self.verifications.add_request(r.into());
+                                self.verifications.add_signature_upload_request(r.into());
                             }
                         }
                     }
@@ -511,10 +469,12 @@ mod test {
     use super::{Sas, VerificationMachine};
     use crate::{
         olm::PrivateCrossSigningIdentity,
-        requests::OutgoingRequests,
         store::{CryptoStore, MemoryStore},
-        verification::test::{get_content_from_request, wrap_any_to_device_content},
-        ReadOnlyAccount, ReadOnlyDevice,
+        verification::{
+            test::{get_content_from_request, wrap_any_to_device_content},
+            VerificationCache,
+        },
+        OutgoingVerificationRequest, ReadOnlyAccount, ReadOnlyDevice,
     };
 
     fn alice_id() -> UserId {
@@ -550,6 +510,7 @@ mod test {
         let machine = VerificationMachine::new(alice, identity, Arc::new(Box::new(store)));
         let (bob_sas, start_content) = Sas::start(
             bob,
+            VerificationCache::new(),
             PrivateCrossSigningIdentity::empty(bob_id()),
             alice_device,
             bob_store,
@@ -584,9 +545,14 @@ mod test {
             .map(|c| wrap_any_to_device_content(alice.user_id(), get_content_from_request(&c)))
             .unwrap();
 
+        bob.receive_event(&event);
+
         let event = bob
-            .receive_event(&event)
-            .map(|c| wrap_any_to_device_content(bob.user_id(), c))
+            .cache
+            .outgoing_requests
+            .iter()
+            .next()
+            .map(|c| wrap_any_to_device_content(bob.user_id(), get_content_from_request(c.value())))
             .unwrap();
 
         assert!(alice_machine.verifications.outgoing_requests.is_empty());
@@ -595,9 +561,9 @@ mod test {
 
         let request = alice_machine.verifications.outgoing_requests.iter().next().unwrap();
 
-        let txn_id = *request.request_id();
+        let txn_id = request.request_id();
 
-        let r = if let OutgoingRequests::ToDeviceRequest(r) = request.request() {
+        let r = if let OutgoingVerificationRequest::ToDevice(r) = request.value() {
             r.clone()
         } else {
             panic!("Invalid request type");
@@ -607,8 +573,7 @@ mod test {
             wrap_any_to_device_content(alice.user_id(), get_content_from_request(&r.into()));
         drop(request);
         alice_machine.mark_request_as_sent(&txn_id);
-
-        assert!(bob.receive_event(&event).is_none());
+        bob.receive_event(&event);
 
         assert!(alice.emoji().is_some());
         assert!(bob.emoji().is_some());
