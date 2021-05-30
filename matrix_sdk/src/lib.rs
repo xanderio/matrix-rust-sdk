@@ -79,7 +79,7 @@ compile_error!("'sso_login' cannot be enabled on 'wasm32' arch");
 pub use bytes::{Bytes, BytesMut};
 #[cfg(feature = "encryption")]
 #[cfg_attr(feature = "docs", doc(cfg(encryption)))]
-pub use matrix_sdk_base::crypto::{EncryptionInfo, LocalTrust};
+pub use matrix_sdk_base::crypto::{EncryptionInfo, LocalTrust, QrVerification};
 pub use matrix_sdk_base::{
     Error as BaseError, Room as BaseRoom, RoomInfo, RoomMember as BaseRoomMember, RoomType,
     Session, StateChanges, StoreError,

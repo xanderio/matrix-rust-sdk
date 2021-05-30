@@ -213,6 +213,14 @@ impl MasterPubkey {
         self.0.keys.get(key_id.as_str()).map(|k| k.as_str())
     }
 
+    /// Get the first available master key.
+    ///
+    /// There's usually only a single master key so this will usually fetch the
+    /// only key.
+    pub fn get_first_key(&self) -> Option<&str> {
+        self.0.keys.values().map(|k| k.as_str()).next()
+    }
+
     /// Check if the given cross signing sub-key is signed by the master key.
     ///
     /// # Arguments

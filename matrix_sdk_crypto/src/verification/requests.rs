@@ -23,6 +23,7 @@ use matrix_sdk_common::{
     api::r0::to_device::DeviceIdOrAllDevices,
     events::{
         key::verification::{
+            done::{DoneEventContent, DoneToDeviceEventContent},
             ready::{ReadyEventContent, ReadyToDeviceEventContent},
             request::RequestToDeviceEventContent,
             start::{StartEventContent, StartMethod, StartToDeviceEventContent},
@@ -35,9 +36,10 @@ use matrix_sdk_common::{
     uuid::Uuid,
     MilliSecondsSinceUnixEpoch,
 };
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use super::{
+    qrcode::QrVerification,
     sas::{content_to_request, OutgoingContent, StartContent as OwnedStartContent},
     FlowId, VerificationCache,
 };
@@ -48,7 +50,12 @@ use crate::{
     ToDeviceRequest, UserIdentities,
 };
 
-const SUPPORTED_METHODS: &[VerificationMethod] = &[VerificationMethod::MSasV1];
+const SUPPORTED_METHODS: &[VerificationMethod] = &[
+    VerificationMethod::MSasV1,
+    VerificationMethod::MQrCodeShowV1,
+    VerificationMethod::MReciprocateV1,
+    VerificationMethod::MQrScanShowV1,
+];
 
 pub enum RequestContent<'a> {
     ToDevice(&'a RequestToDeviceEventContent),
@@ -198,6 +205,32 @@ impl<'a> TryFrom<&'a OutgoingContent> for StartContent<'a> {
                     Err(())
                 }
             }
+        }
+    }
+}
+
+pub enum DoneContent<'a> {
+    ToDevice(&'a DoneToDeviceEventContent),
+    Room(&'a DoneEventContent),
+}
+
+impl<'a> From<&'a DoneEventContent> for DoneContent<'a> {
+    fn from(c: &'a DoneEventContent) -> Self {
+        Self::Room(c)
+    }
+}
+
+impl<'a> From<&'a DoneToDeviceEventContent> for DoneContent<'a> {
+    fn from(c: &'a DoneToDeviceEventContent) -> Self {
+        Self::ToDevice(c)
+    }
+}
+
+impl<'a> DoneContent<'a> {
+    pub fn flow_id(&self) -> &str {
+        match self {
+            Self::ToDevice(c) => &c.transaction_id,
+            Self::Room(c) => &c.relation.event_id.as_str(),
         }
     }
 }
@@ -426,6 +459,11 @@ impl VerificationRequest {
         }
     }
 
+    /// Generate a QR code
+    pub async fn generate_qr_code(&self) -> Option<QrVerification> {
+        self.inner.lock().unwrap().generate_qr_code().await
+    }
+
     fn content_to_request(
         &self,
         other_device_id: DeviceIdOrAllDevices,
@@ -472,6 +510,15 @@ impl InnerRequest {
             Some(content)
         } else {
             None
+        }
+    }
+
+    async fn generate_qr_code(&self) -> Option<QrVerification> {
+        match self {
+            InnerRequest::Created(_) => None,
+            InnerRequest::Requested(_) => None,
+            InnerRequest::Ready(s) => s.generate_qr_code().await,
+            InnerRequest::Passive(_) => None,
         }
     }
 
@@ -672,6 +719,39 @@ impl RequestState<Ready> {
         )
     }
 
+    async fn generate_qr_code(&self) -> Option<QrVerification> {
+        if self.account.user_id() == &self.other_user_id {
+            if self.private_cross_signing_identity.has_master_key().await {
+                None
+            } else if let Some(identity) =
+                self.store.get_user_identity(self.account.user_id()).await.unwrap()
+            {
+                if let Some(identity) = identity.own() {
+                    if identity.is_verified() {
+                        None
+                    } else {
+                        let qr_verification = QrVerification::new_self_no_master(
+                            self.account.clone(),
+                            self.store.clone(),
+                            self.flow_id.as_ref().to_owned(),
+                            identity.master_key().get_first_key().unwrap().to_string(),
+                        );
+
+                        self.verification_cache.add_qr(qr_verification.clone());
+
+                        Some(qr_verification)
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     async fn receive_start<'a>(
         &self,
         sender: &UserId,
@@ -719,8 +799,25 @@ impl RequestState<Ready> {
                     )
                 }
             },
+            StartMethod::ReciprocateV1(_) => {
+                if let Some(qr_verification) = self.verification_cache.get_qr(content.flow_id()) {
+                    if let Some(content) = qr_verification.receive_reciprocation(content) {
+                        self.verification_cache.queue_up_content(
+                            device.user_id(),
+                            device.device_id(),
+                            content,
+                        )
+                    }
+                    trace!(
+                        sender = device.user_id().as_str(),
+                        device_id = device.device_id().as_str(),
+                        verification =? qr_verification,
+                        "Received a reciprocation"
+                    )
+                }
+            }
             m => {
-                warn!(method =? m, "Received a key verificaton start event with an unknown method")
+                warn!(method =? m, "Received a key verificaton start event with an unsupported method")
             }
         }
 

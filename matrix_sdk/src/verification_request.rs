@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use matrix_sdk_base::crypto::{
-    OutgoingVerificationRequest, VerificationRequest as BaseVerificationRequest,
+    OutgoingVerificationRequest, QrVerification, VerificationRequest as BaseVerificationRequest,
 };
 
 use crate::{Client, Result};
@@ -40,6 +40,11 @@ impl VerificationRequest {
         }
 
         Ok(())
+    }
+
+    /// Generate a QR code
+    pub async fn generate_qr_code(&self) -> Option<QrVerification> {
+        self.inner.generate_qr_code().await
     }
 
     /// Cancel the verification request

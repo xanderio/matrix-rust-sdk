@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod machine;
+mod qrcode;
 mod requests;
 mod sas;
 
@@ -24,6 +25,7 @@ use matrix_sdk_common::{
     },
     identifiers::{EventId, RoomId},
 };
+pub use qrcode::QrVerification;
 pub use requests::VerificationRequest;
 pub use sas::{AcceptSettings, Sas, VerificationResult};
 

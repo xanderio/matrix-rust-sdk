@@ -34,13 +34,15 @@ use crate::{
     olm::PrivateCrossSigningIdentity,
     requests::OutgoingRequest,
     store::{CryptoStore, CryptoStoreError},
-    OutgoingVerificationRequest, ReadOnlyAccount, ReadOnlyDevice, RoomMessageRequest,
+    OutgoingVerificationRequest, QrVerification, ReadOnlyAccount, ReadOnlyDevice,
+    RoomMessageRequest,
 };
 
 #[derive(Clone, Debug)]
 pub struct VerificationCache {
     sas_verification: Arc<DashMap<String, Sas>>,
     room_sas_verifications: Arc<DashMap<EventId, Sas>>,
+    qr_verifications: Arc<DashMap<String, QrVerification>>,
     outgoing_requests: Arc<DashMap<Uuid, OutgoingRequest>>,
 }
 
@@ -49,6 +51,7 @@ impl VerificationCache {
         Self {
             sas_verification: DashMap::new().into(),
             room_sas_verifications: DashMap::new().into(),
+            qr_verifications: DashMap::new().into(),
             outgoing_requests: DashMap::new().into(),
         }
     }
@@ -97,6 +100,14 @@ impl VerificationCache {
         requests.extend(room_requests);
 
         requests
+    }
+
+    pub fn get_qr(&self, flow_id: &str) -> Option<QrVerification> {
+        self.qr_verifications.get(flow_id).map(|qr| qr.clone())
+    }
+
+    pub fn add_qr(&self, verification: QrVerification) {
+        self.qr_verifications.insert(verification.flow_id().as_str().to_owned(), verification);
     }
 
     pub fn get_sas(&self, transaction_id: &str) -> Option<Sas> {
