@@ -98,14 +98,13 @@ pub mod room;
 mod room_member;
 
 #[cfg(feature = "encryption")]
-mod device;
+#[cfg_attr(feature = "docs", doc(cfg(encryption)))]
+pub mod identities;
 #[cfg(feature = "encryption")]
+#[cfg_attr(feature = "docs", doc(cfg(encryption)))]
 pub mod verification;
 
 pub use client::{Client, ClientConfig, LoopCtrl, RequestConfig, SyncSettings};
-#[cfg(feature = "encryption")]
-#[cfg_attr(feature = "docs", doc(cfg(encryption)))]
-pub use device::Device;
 pub use error::{Error, HttpError, HttpResult, Result};
 pub use event_handler::{CustomEvent, EventHandler};
 pub use http_client::HttpSend;
