@@ -32,6 +32,7 @@ docs = ["encryption", "sled_cryptostore", "sled_state_store", "sso_login"]
 
 [dependencies]
 dashmap = "4.0.2"
+event-listener = "2.5.1"
 futures = "0.3.15"
 http = "0.2.4"
 serde_json = "1.0.64"
