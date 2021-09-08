@@ -91,9 +91,7 @@ use http::Uri;
 pub use matrix_sdk;
 #[doc(no_inline)]
 pub use matrix_sdk::ruma;
-use matrix_sdk::{
-    bytes::Bytes, reqwest::Url, Client, ClientConfig, EventHandler, HttpError, Session,
-};
+use matrix_sdk::{bytes::Bytes, reqwest::Url, Client, ClientConfig, EventHandler, Session};
 use regex::Regex;
 use ruma::{
     api::{
@@ -395,18 +393,18 @@ impl AppService {
         match client.register(request).await {
             Ok(_) => (),
             Err(error) => match error {
-                matrix_sdk::Error::Http(HttpError::UiaaError(FromHttpResponseError::Http(
+                matrix_sdk::HttpError::UiaaError(FromHttpResponseError::Http(
                     ServerError::Known(UiaaResponse::MatrixError(ref matrix_error)),
-                ))) => {
+                )) => {
                     match matrix_error.kind {
                         ErrorKind::UserInUse => {
                             // TODO: persist the fact that we registered that user
                             warn!("{}", matrix_error.message);
                         }
-                        _ => return Err(error.into()),
+                        _ => return Err(matrix_sdk::Error::from(error).into()),
                     }
                 }
-                _ => return Err(error.into()),
+                _ => return Err(matrix_sdk::Error::from(error).into()),
             },
         }
 
