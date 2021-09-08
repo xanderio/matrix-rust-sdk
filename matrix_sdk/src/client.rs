@@ -15,16 +15,16 @@
 
 #[cfg(all(feature = "encryption", not(target_arch = "wasm32")))]
 use std::path::PathBuf;
-#[cfg(feature = "encryption")]
-use std::{
-    collections::BTreeMap,
-    io::{Cursor, Write},
-};
 #[cfg(feature = "sso_login")]
 use std::{
     collections::HashMap,
     io::{Error as IoError, ErrorKind as IoErrorKind},
     ops::Range,
+};
+#[cfg(feature = "encryption")]
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::{Cursor, Write},
 };
 use std::{
     fmt::{self, Debug},
@@ -704,6 +704,16 @@ impl Client {
     #[cfg_attr(feature = "docs", doc(cfg(encryption)))]
     pub async fn ed25519_key(&self) -> Option<String> {
         self.base_client.olm_machine().await.map(|o| o.identity_keys().ed25519().to_owned())
+    }
+
+    /// Get all the tracked users we know about
+    ///
+    /// Tracked users are users for which we keep the device list of E2EE
+    /// capable devices up to date.
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(feature = "docs", doc(cfg(encryption)))]
+    pub async fn tracked_users(&self) -> HashSet<UserId> {
+        self.base_client.olm_machine().await.map(|o| o.tracked_users()).unwrap_or_default()
     }
 
     /// Fetches the display name of the owner of the client.
